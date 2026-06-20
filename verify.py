@@ -30,6 +30,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="标定后验证: 重投影误差统计 + 2D/3D 可视化")
-    parser.add_argument("--config", "-c", default="config/config.yaml",
+    parser.add_argument("--config", "-c", 
+                        default="config/configstereo.yaml",
                         help="标定配置文件路径")
     main(parser.parse_args())

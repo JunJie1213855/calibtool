@@ -83,6 +83,7 @@ class StereoCameraCalibration:
         logger.info(f"开始保存,保存目录为: {self.args.output_dir}")
         os.makedirs(self.args.output_dir,exist_ok=True)
         self.__save_intrinsics(K_l, D_l, K_r, D_r, R, t)
+        self.__save_pair_record()
 
 
         if self.args.camera_sensor_type == "Omnidir":
@@ -124,7 +125,7 @@ class StereoCameraCalibration:
                 logger.info(message)
                 tqdm.write(message)
                 continue # 下一帧
-            message = f"找到了角点,图像路径为: {left_path}"
+            message = f"找到了角点,图像路径为: {left_path}\n"
             logger.info(message)
             tqdm.write(message)
             # 有效图片
@@ -165,6 +166,7 @@ class StereoCameraCalibration:
         logger.info(f"开始保存,保存目录为: {self.args.output_dir}")
         os.makedirs(self.args.output_dir,exist_ok=True)
         self.__save_intrinsics(K_l, D_l, K_r, D_r, R, t)
+        self.__save_pair_record()
 
 
         if self.args.camera_sensor_type == "Omnidir":
@@ -389,6 +391,29 @@ class StereoCameraCalibration:
 
         fs.release()
         logger.info(f"标定结果已保存到 {save_path}")
+
+    def __save_pair_record(self):
+        """双目: 记录左右目都成功检测到角点的图对. 按后缀数字匹配 (left01 ↔ right01).
+        格式: 每行 'leftXX.jpg rightXX.jpg', 只列左右都有的对.
+        """
+        import re
+        # 取文件名末尾的数字段 (left1.png -> 1, WIN_20230328_15_47_26_Pro.jpg -> 26)
+        num_pat = re.compile(r"(\d+)\D*$")
+        left_by_id, right_by_id = {}, {}
+        for p in self.left_valid_paths:
+            m = num_pat.search(os.path.basename(p))
+            if m:
+                left_by_id[m.group(1)] = os.path.basename(p)
+        for p in self.right_valid_paths:
+            m = num_pat.search(os.path.basename(p))
+            if m:
+                right_by_id[m.group(1)] = os.path.basename(p)
+        common = sorted(set(left_by_id) & set(right_by_id))
+        path = Path(self.args.output_dir) / "pairRecord.txt"
+        with open(path, "w", encoding="utf-8") as f:
+            for sid in common:
+                f.write(f"{left_by_id[sid]} {right_by_id[sid]}\n")
+        logger.info(f"双目配对记录已保存: {path} (共 {len(common)} 对)")
 
 
 

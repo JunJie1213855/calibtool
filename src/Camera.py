@@ -160,26 +160,31 @@ class Camera(object):
         # 白板图像，用于显示检测角点和反投影角点
         left_blank = np.ones((self.height,self.width,3),np.uint8)  * 255
         right_blank = np.ones((self.height,self.width,3),np.uint8)  * 255
-        
+
         left_reproj_error = {}
         right_reproj_error = {}
-        
+
+        # image_points_dir / world_points_file 在标定时是 CSV 复用路径, 默认为空;
+        # 矫正/可视化阶段没有 CSV, 直接回退到 output_dir
+        img_pts_root = Path(self.args.image_points_dir or self.args.output_dir)
+        world_pts_file = self.args.world_points_file or str(Path(self.args.output_dir) / "world_coordinates.csv")
+
         if self.Camera_NumType == "Monocular":
             # 加载图像角点
-            left_corners_dcit= load_corner_from_csv(csv_dir=Path(self.args.image_points_dir) / "corners")
+            left_corners_dcit= load_corner_from_csv(csv_dir=img_pts_root / "corners")
             left_pose_dcit = load_pose_file(Path(self.args.output_dir) / "pose.txt")
         elif self.Camera_NumType == "Stereo" and (not self.Camera_SensorType == "Omnidir"):
             # 加载图像角点
-            left_corners_dcit = load_corner_from_csv(csv_dir=Path(self.args.image_points_dir) / "left_corners")
+            left_corners_dcit = load_corner_from_csv(csv_dir=img_pts_root / "left_corners")
             left_pose_dcit = load_pose_file(Path(self.args.output_dir) / "left_pose.txt")
-            right_corners_dcit = load_corner_from_csv(csv_dir=Path(self.args.image_points_dir) / "right_corners")
+            right_corners_dcit = load_corner_from_csv(csv_dir=img_pts_root / "right_corners")
             right_pose_dcit = load_pose_file(Path(self.args.output_dir) / "right_pose.txt")
         elif self.Camera_NumType == "Stereo" and  self.Camera_SensorType == "Omnidir": # 只有左目
-            left_corners_dcit = load_corner_from_csv(csv_dir=Path(self.args.image_points_dir) / "left_corners")
+            left_corners_dcit = load_corner_from_csv(csv_dir=img_pts_root / "left_corners")
             left_pose_dcit = load_pose_file(Path(self.args.output_dir) / "left_pose.txt")
-            
+
         # 加载世界点
-        world_points = load_world_points_from_csv(self.args.world_points_file,len(left_corners_dcit))
+        world_points = load_world_points_from_csv(world_pts_file,len(left_corners_dcit))
         if self.Camera_NumType == "Monocular":
             # 循环计算
             for world_pts,(name, (rvec, tvec)) in zip(world_points, left_pose_dcit.items()):

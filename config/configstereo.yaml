@@ -1,4 +1,4 @@
-root_dir: calibration
+root_dir: E:/dataset/CameraCalib/public/bothImagesFixedStereo # calibration
 Camera_SensorType: Pinhole
 Camera_NumType: Stereo
 square_size: 0.02

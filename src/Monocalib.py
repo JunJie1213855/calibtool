@@ -53,6 +53,7 @@ class MonocularCameraCalibration:
         # 保存
         logger.info(f"开始保存,保存目录为: {self.args.output_dir}")
         os.makedirs(self.args.output_dir,exist_ok=True)
+        self.__save_pair_record()
         self.__save_intrinsics(cameraMatrix,distCoeffs)
         if self.args.camera_sensor_type == "Omnidir":
             omnidir_vaildpaths = []
@@ -110,6 +111,7 @@ class MonocularCameraCalibration:
         # 保存
         logger.info(f"开始保存,保存目录为: {self.args.output_dir}")
         os.makedirs(self.args.output_dir,exist_ok=True)
+        self.__save_pair_record()
         self.__save_intrinsics(cameraMatrix,distCoeffs)
         if self.args.camera_sensor_type == "Omnidir":
             omnidir_vaildpaths = []
@@ -217,6 +219,14 @@ class MonocularCameraCalibration:
             fs.write("xi_l",self.xi)
         fs.release()
         logger.info(f"标定结果已保存到 {save_path}")
+
+    def __save_pair_record(self):
+        """单目: 记录所有成功检测到角点的图像 (一行一个 basename)."""
+        path = Path(self.args.output_dir) / "pairRecord.txt"
+        with open(path, "w", encoding="utf-8") as f:
+            for p in self.valid_paths:
+                f.write(f"{os.path.basename(p)}\n")
+        logger.info(f"单目有效图像列表已保存: {path} (共 {len(self.valid_paths)} 张)")
 
     def __load_points_from_csv(self):
         """从CSV文件加载角点数据和世界点数据"""

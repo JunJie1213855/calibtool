@@ -13,6 +13,6 @@ def main(args):
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config","-c",default="config/1920new.yaml")
+    parser.add_argument("--config","-c",default="config/configstereo.yaml")
     args = parser.parse_args()
     main(args)

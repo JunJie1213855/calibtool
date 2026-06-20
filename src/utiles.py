@@ -253,3 +253,26 @@ def load_pose_file(pose_path: Path) -> dict:
             tvec = np.array([float(t) for t in tokens[4:7]], dtype=np.float64)
             poses_dict[name] = (rvec, tvec)
     return poses_dict
+
+
+def read_pair_record(pair_record_path):
+    """读 pairRecord.txt. 自动识别单/双目格式:
+    - 单目: 每行一个图名 → 返回 list[str]
+    - 双目: 每行 "left right" → 返回 list[tuple[str, str]]
+    文件不存在或为空 → 返回 [].
+    """
+    p = Path(pair_record_path)
+    if not p.exists():
+        return []
+    out = []
+    with open(p, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            tokens = line.split()
+            if len(tokens) >= 2:
+                out.append((tokens[0], tokens[1]))
+            else:
+                out.append(tokens[0])
+    return out
