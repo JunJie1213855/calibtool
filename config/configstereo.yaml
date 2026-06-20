@@ -1,14 +1,13 @@
-root_dir: calibration-monocular     # 标定图像的目录,目录下就是图像
-Camera_SensorType: Pinhole      # 支持: Pinhole, Fisheye, Omnidir
-Camera_NumType: Monocular       # 支持: Monocular, Stereo
-square_size: 0.02               # 单位距离，比如每格边长 m
-board_size: [9, 6]              # 棋盘格规格: 行数7, 列数6
-board_type: Corner              # 支持: Corner 或 Circle
-raduis_size: [5, 5] 
-criteria: [3, 100, 1e-7]        # 终止条件: cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER
-flag: 0                         # 标定标志位（opencv 标志组合）
-save_dir: ./output
-#  CSV数据加载选项
-use_csv_data: false            # 是否使用CSV数据而非从图像检测角点，运行完false后可以设置为true试一下
-image_points_dir: ./output       # 单目：图像角点CSV文件目录，会在该文件夹下创建一个corners文件，之后保存在output/corners里。
-world_points_file: ./output/world_coordinates.csv # 世界坐标点CSV文件
+root_dir: calibration
+Camera_SensorType: Pinhole
+Camera_NumType: Stereo
+square_size: 0.02
+board_size: [9, 6]
+board_type: Corner
+raduis_size: [5, 5]
+criteria: [3, 100, 1e-7]
+flag: 0
+save_dir: ./output_stereo
+use_csv_data: false
+image_points_dir: null
+world_points_file: null

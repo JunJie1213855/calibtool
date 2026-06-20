@@ -15,6 +15,24 @@ matplotlib.use("Agg")  # 非交互后端, 避免阻塞
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  触发 3d 投影注册
 from matplotlib import cm
+from matplotlib import font_manager as _fm
+
+# 找系统里的 CJK 字体, 标题里的中文不变成方块
+for _fp in (
+    "C:/Windows/Fonts/simhei.ttf",
+    "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/simsun.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+):
+    if os.path.exists(_fp):
+        try:
+            _fm.fontManager.addfont(_fp)
+        except Exception:
+            pass
+plt.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei", "PingFang SC",
+                                    "WenQuanYi Zen Hei", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False
 
 from .utiles import (
     parse_yaml,
@@ -360,14 +378,15 @@ class PostCalibration:
         baseline = float(np.linalg.norm(t_lr))
         # 左相机
         ax.scatter(0, 0, c="red", s=160, marker="o", edgecolors="black", label="Left cam")
-        ax.quiver(0, 0, 1, 0, color="r", arrow_length_ratio=0.1, scale=10)
-        ax.text(0.05, 0.05, "L", color="r", fontsize=14)
-        # 右相机 = R_lr^T @ t... 这里 baseline 直接是 t 长度, 假设近似沿 X
+        ax.arrow(0, 0, 0.05, 0, head_width=0.02, head_length=0.01, fc="r", ec="r")
+        ax.text(0.06, 0.0, "L", color="r", fontsize=14, va="center")
+        # 右相机
         ax.scatter(t_lr[0], t_lr[1], c="blue", s=160, marker="^",
                    edgecolors="black", label="Right cam")
-        ax.quiver(t_lr[0], t_lr[1], R_lr[0, 0], R_lr[1, 0], color="b",
-                  arrow_length_ratio=0.1, scale=10)
-        ax.text(t_lr[0] + 0.02, t_lr[1] + 0.02, "R", color="b", fontsize=14)
+        # 朝向: R_lr 第一列 (左相机 X 轴在世界系下的方向) 作为朝向示意
+        ax.arrow(t_lr[0], t_lr[1], R_lr[0, 0] * 0.05, R_lr[1, 0] * 0.05,
+                 head_width=0.02, head_length=0.01, fc="b", ec="b")
+        ax.text(t_lr[0] + 0.06, t_lr[1], "R", color="b", fontsize=14, va="center")
         # baseline 线
         ax.plot([0, t_lr[0]], [0, t_lr[1]], "k--", alpha=0.6)
         ax.text(t_lr[0] / 2, t_lr[1] / 2,
@@ -431,5 +450,211 @@ class PostCalibration:
         self.plot_poses_3d()
         if self.is_stereo:
             self.plot_stereo_baseline()
+            self.plot_epipolar_before()
+            self.plot_rectified_pair()
         self.write_summary()
         logger.info(f"验证完成, 产物目录: {self.verify_dir}")
+
+    # ----------------------------------------------- stereo image helpers
+    def _find_first_pair(self):
+        """找同时有左右角点的第一对. 返回 (id, name_l, name_r), id 是后缀数字."""
+        import re
+        left_by_id, right_by_id = {}, {}
+        for k in self.corners:
+            m = re.search(r"(\d+)$", k)
+            if not m:
+                continue
+            sid = m.group(1)
+            if k.startswith("L_"):
+                left_by_id[sid] = k[2:]
+            elif k.startswith("R_"):
+                right_by_id[sid] = k[2:]
+        common = sorted(set(left_by_id) & set(right_by_id))
+        if not common:
+            return None
+        sid = common[0]
+        return sid, left_by_id[sid], right_by_id[sid]
+
+    def _resolve_image_path(self, name, side):
+        """根据 config.root_dir 找原始图 (双目的 left/right 子目录)."""
+        if self.is_stereo:
+            sub = "left" if side == "L" else "right"
+            d = Path(self.config.root_dir) / sub
+        else:
+            d = Path(self.config.root_dir)
+        for ext in (".jpg", ".jpeg", ".png", ".bmp", ".JPG", ".PNG"):
+            p = d / f"{name}{ext}"
+            if p.exists():
+                return p
+        return None
+
+    def _fundamental_matrix(self):
+        K_l, K_r = self.K["L"], self.K["R"]
+        R, t = self.stereo_R, self.stereo_t.flatten()
+        t_cross = np.array([
+            [0, -t[2], t[1]],
+            [t[2], 0, -t[0]],
+            [-t[1], t[0], 0],
+        ])
+        E = t_cross @ R
+        F = np.linalg.inv(K_r).T @ E @ np.linalg.inv(K_l)
+        return F
+
+    # -------------------------------------------------------- epipolar pre
+    def plot_epipolar_before(self):
+        """校正前: 在 undistort 后左图画角点, 右图画对应极线 + 真实匹配点."""
+        pair = self._find_first_pair()
+        if pair is None:
+            logger.warning("无有效左右图像对, 跳过 epipolar_before")
+            return
+        _, name_l, name_r = pair
+        p_l = self._resolve_image_path(name_l, "L")
+        p_r = self._resolve_image_path(name_r, "R")
+        if p_l is None or p_r is None:
+            logger.warning(f"找不到图像: {p_l} 或 {p_r}")
+            return
+
+        img_l = cv2.imread(str(p_l))
+        img_r = cv2.imread(str(p_r))
+        K_l, D_l = self.K["L"], self.D["L"]
+        K_r, D_r = self.K["R"], self.D["R"]
+        F = self._fundamental_matrix()
+
+        # 只 undistort, 不 rectify
+        img_l_und = cv2.undistort(img_l, K_l, D_l)
+        img_r_und = cv2.undistort(img_r, K_r, D_r)
+        h, w = img_r_und.shape[:2]
+
+        pts_l = self.corners.get(f"L_{name_l}")
+        pts_r = self.corners.get(f"R_{name_r}")
+        if pts_l is None or pts_r is None:
+            logger.warning("角点缺失, 跳过 epipolar_before")
+            return
+
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+        axes[0].imshow(cv2.cvtColor(img_l_und, cv2.COLOR_BGR2RGB))
+        axes[0].scatter(pts_l[:, 0], pts_l[:, 1], s=30, c="red",
+                        edgecolors="yellow", linewidths=0.7, zorder=3)
+        axes[0].set_title(f"Left (undistorted) — {name_l}\n"
+                          f"detected corners: {len(pts_l)}")
+        axes[0].set_xlim(0, w - 1)
+        axes[0].set_ylim(h - 1, 0)
+        axes[0].axis("off")
+
+        # 右图: 画极线 (红线) + 真实匹配点 (绿圈)
+        axes[1].imshow(cv2.cvtColor(img_r_und, cv2.COLOR_BGR2RGB))
+        axes[1].scatter(pts_r[:, 0], pts_r[:, 1], s=30, c="lime",
+                        edgecolors="black", linewidths=0.7, zorder=3,
+                        label="matched right corner")
+        # 极线: l[0]x + l[1]y + l[2] = 0  →  x = (-l[1]y - l[2]) / l[0]
+        # 端点用 x 在 [0, w-1] 范围内采样, 避免 F 未归一化时坐标爆掉
+        n_samples = 80
+        xs = np.linspace(0, w - 1, n_samples)
+        for p in pts_l:
+            line = F @ np.array([p[0], p[1], 1.0])
+            if abs(line[0]) < 1e-9:
+                continue
+            ys = (-line[0] * xs - line[2]) / line[1]
+            # 只画落在 [0, h-1] 范围内的连续段
+            mask = (ys >= 0) & (ys <= h - 1)
+            if not mask.any():
+                continue
+            # 找 mask 连续段
+            seg_start = None
+            for i in range(n_samples):
+                if mask[i] and seg_start is None:
+                    seg_start = i
+                elif not mask[i] and seg_start is not None:
+                    axes[1].plot(xs[seg_start:i], ys[seg_start:i], "r-",
+                                 alpha=0.4, linewidth=0.7, zorder=2)
+                    seg_start = None
+            if seg_start is not None:
+                axes[1].plot(xs[seg_start:], ys[seg_start:], "r-",
+                             alpha=0.4, linewidth=0.7, zorder=2)
+        axes[1].set_xlim(0, w - 1)
+        axes[1].set_ylim(h - 1, 0)
+        axes[1].set_title(f"Right (undistorted) — epipolar lines from LEFT corners\n"
+                          f"(red = l_r = F·p_l,  green = real matched)")
+        axes[1].axis("off")
+        axes[1].legend(loc="upper right", fontsize=9)
+
+        plt.tight_layout()
+        out = self.verify_dir / "epipolar_before.png"
+        fig.savefig(out, dpi=120)
+        plt.close(fig)
+        logger.info(f"校正前极线图: {out}")
+
+    # ------------------------------------------------------- rectified
+    def plot_rectified_pair(self):
+        """校正后: stereoRectify + remap, 画水平线检查 y 坐标对齐."""
+        pair = self._find_first_pair()
+        if pair is None:
+            return
+        _, name_l, name_r = pair
+        p_l = self._resolve_image_path(name_l, "L")
+        p_r = self._resolve_image_path(name_r, "R")
+        if p_l is None or p_r is None:
+            return
+        K_l, D_l = self.K["L"], self.D["L"]
+        K_r, D_r = self.K["R"], self.D["R"]
+        R, t = self.stereo_R, self.stereo_t
+        w, h = self.width, self.height
+        sensor = self.config.camera_sensor_type
+
+        try:
+            if sensor == "Pinhole":
+                R1, R2, P1, P2, Q, _, _ = cv2.stereoRectify(
+                    K_l, D_l, K_r, D_r, (w, h), R, t,
+                    flags=0, alpha=self.config.alpha,
+                )
+                m1l, m2l = cv2.initUndistortRectifyMap(K_l, D_l, R1, P1, (w, h), cv2.CV_32FC1)
+                m1r, m2r = cv2.initUndistortRectifyMap(K_r, D_r, R2, P2, (w, h), cv2.CV_32FC1)
+            elif sensor == "Fisheye":
+                R1, R2, P1, P2, Q = cv2.fisheye.stereoRectify(
+                    K_l, D_l, K_r, D_r, (w, h), R, t, flags=0,
+                )
+                m1l, m2l = cv2.fisheye.initUndistortRectifyMap(K_l, D_l, R1, P1, (w, h), cv2.CV_32FC1)
+                m1r, m2r = cv2.fisheye.initUndistortRectifyMap(K_r, D_r, R2, P2, (w, h), cv2.CV_32FC1)
+            else:
+                logger.warning(f"sensor {sensor} 的 rectify 在 verify 中暂未实现")
+                return
+        except cv2.error as e:
+            logger.warning(f"stereoRectify 失败: {e}")
+            return
+
+        img_l = cv2.imread(str(p_l))
+        img_r = cv2.imread(str(p_r))
+        rect_l = cv2.remap(img_l, m1l, m2l, cv2.INTER_LINEAR)
+        rect_r = cv2.remap(img_r, m1r, m2r, cv2.INTER_LINEAR)
+        pts_l = self.corners.get(f"L_{name_l}")
+        pts_r = self.corners.get(f"R_{name_r}")
+
+        fig, axes = plt.subplots(2, 1, figsize=(14, 11))
+        axes[0].imshow(cv2.cvtColor(rect_l, cv2.COLOR_BGR2RGB))
+        if pts_l is not None:
+            axes[0].scatter(pts_l[:, 0], pts_l[:, 1], s=20, c="red",
+                            edgecolors="yellow", linewidths=0.5, zorder=3)
+            # 水平线 (校正后极线应该是水平的)
+            for y in pts_l[:, 1]:
+                axes[0].axhline(y, color="cyan", linestyle="--",
+                                alpha=0.5, linewidth=0.5, zorder=2)
+        axes[0].set_title(f"Rectified Left — {name_l}\n"
+                          f"(cyan dashed = ideal horizontal epipolar lines)")
+        axes[0].axis("off")
+
+        axes[1].imshow(cv2.cvtColor(rect_r, cv2.COLOR_BGR2RGB))
+        if pts_r is not None:
+            axes[1].scatter(pts_r[:, 0], pts_r[:, 1], s=20, c="lime",
+                            edgecolors="black", linewidths=0.5, zorder=3)
+            for y in pts_r[:, 1]:
+                axes[1].axhline(y, color="cyan", linestyle="--",
+                                alpha=0.5, linewidth=0.5, zorder=2)
+        axes[1].set_title(f"Rectified Right — {name_r}\n"
+                          f"(如果左右 y 接近 → 校正成功)")
+        axes[1].axis("off")
+
+        plt.tight_layout()
+        out = self.verify_dir / "rectified_pair.png"
+        fig.savefig(out, dpi=120)
+        plt.close(fig)
+        logger.info(f"校正后对比图: {out}")
