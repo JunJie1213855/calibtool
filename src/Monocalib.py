@@ -204,7 +204,7 @@ class MonocularCameraCalibration:
 
 
     def __save_intrinsics(self,K,D):
-        save_path = Path(self.args.output_dir) / "param.yaml"  # 从配置中获取保存路径
+        save_path = str(Path(self.args.output_dir) / "param.yaml")  # 从配置中获取保存路径
         fs = cv2.FileStorage(save_path, cv2.FILE_STORAGE_WRITE)
 
         fs.write("Camera_SensorType", self.args.camera_sensor_type)
