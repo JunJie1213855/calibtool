@@ -475,7 +475,7 @@ class PostCalibration:
 
     # ----------------------------------------------- rectified samples
     def _compute_rectify_maps(self):
-        """返回 (m1l, m2l, m1r, m2r) 或 None."""
+        """返回 (m1l, m2l, m1r, m2r, P1, P2) 或 None (单目/sensor 不支持)."""
         K_l, D_l = self.K["L"], self.D["L"]
         K_r, D_r = self.K["R"], self.D["R"]
         R, t = self.stereo_R, self.stereo_t
@@ -499,7 +499,7 @@ class PostCalibration:
         except cv2.error as e:
             logger.warning(f"stereoRectify 失败: {e}")
             return None
-        return m1l, m2l, m1r, m2r
+        return m1l, m2l, m1r, m2r, P1, P2
 
     @staticmethod
     def _remap_points(pts, map1, map2):
@@ -526,93 +526,137 @@ class PostCalibration:
             out[idx] = [x, y]
         return out
 
-    def extract_rectified_samples(self, n_samples: int = 3):
-        """采样保存校正后的图像.
-        单目: undistort → samples/<name>_undistorted.png
-        双目: rectify → samples/<id>_{L,R}_rectified.png + samples/<id>_stitched.png (画线)
+    def rectify_pair(self, name_l, name_r, out_dir, make_stitched: bool = True):
+        """Rectify 一对 (stereo) 或一张 (mono) 图, 保存到 out_dir.
+        Stereo: 写 {name_l}_rectified.png, {name_r}_rectified.png,
+                (可选) {name_l}_stitched.png (拼接 + 等距彩线 + 抽样角点)
+        Mono:   写 {name_l}_undistorted.png
+        返回 dict 含产物路径 (失败返回 None).
         """
-        out_dir = self.verify_dir / "samples"
-        out_dir.mkdir(exist_ok=True)
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
         if self.is_stereo:
-            self._extract_stereo_samples(out_dir, n_samples)
-        else:
-            self._extract_mono_samples(out_dir, n_samples)
+            return self._rectify_stereo_pair(name_l, name_r, out_dir, make_stitched)
+        return self._rectify_mono_image(name_l, out_dir)
 
-    def _extract_mono_samples(self, out_dir, n):
-        K, D = self.K["L"], self.D["L"]
-        # 优先用 pairRecord.txt (标定过的"真有效"列表), 不存在则用所有位姿
-        record = read_pair_record(self.output_dir / "pairRecord.txt")
-        keys = record if record else sorted(self.poses.keys())
-        if not keys:
-            logger.warning("无图像位姿, 跳过单目采样")
-            return
-        sel = np.linspace(0, len(keys) - 1, min(n, len(keys)), dtype=int)
-        for i in sel:
-            name = keys[i]
-            path = self._resolve_image_path(name, "L")
-            if path is None:
-                logger.warning(f"找不到图像: {name}")
-                continue
-            img = cv2.imread(str(path))
-            und = cv2.undistort(img, K, D)
-            out = out_dir / f"{name}_undistorted.png"
-            cv2.imwrite(str(out), und)
-            logger.info(f"单目 undistort 样本: {out}")
-
-    def _extract_stereo_samples(self, out_dir, n):
+    def _rectify_stereo_pair(self, name_l, name_r, out_dir, make_stitched):
         maps = self._compute_rectify_maps()
         if maps is None:
-            return
-        m1l, m2l, m1r, m2r = maps
-        # 优先用 pairRecord.txt: [(left, right), ...]
-        record = read_pair_record(self.output_dir / "pairRecord.txt")
-        if record and isinstance(record[0], tuple):
-            pairs = list(record)
-        else:
-            # 回退: 按数字后缀找左右共有的图对
-            import re
-            left_by_id, right_by_id = {}, {}
-            for k in self.corners:
-                m = re.search(r"(\d+)\D*$", k)
-                if not m:
-                    continue
-                sid = m.group(1)
-                if k.startswith("L_"):
-                    left_by_id[sid] = k[2:]
-                elif k.startswith("R_"):
-                    right_by_id[sid] = k[2:]
-            pairs = [(left_by_id[s], right_by_id[s]) for s in sorted(set(left_by_id) & set(right_by_id))]
-        if not pairs:
-            logger.warning("无可用左右图对, 跳过双目采样")
-            return
-        sel = np.linspace(0, len(pairs) - 1, min(n, len(pairs)), dtype=int)
-        sample_pairs = [pairs[i] for i in sel]
-        for name_l, name_r in sample_pairs:
-            p_l = self._resolve_image_path(name_l, "L")
-            p_r = self._resolve_image_path(name_r, "R")
-            if p_l is None or p_r is None:
-                logger.warning(f"找不到图像对: {name_l} / {name_r}")
-                continue
-            img_l = cv2.imread(str(p_l))
-            img_r = cv2.imread(str(p_r))
-            rect_l = cv2.remap(img_l, m1l, m2l, cv2.INTER_LINEAR)
-            rect_r = cv2.remap(img_r, m1r, m2r, cv2.INTER_LINEAR)
-            cv2.imwrite(str(out_dir / f"{name_l}_rectified.png"), rect_l)
-            cv2.imwrite(str(out_dir / f"{name_r}_rectified.png"), rect_r)
+            return None
+        m1l, m2l, m1r, m2r, _P_l, _P_r = maps
+        p_l = self._resolve_image_path(name_l, "L")
+        p_r = self._resolve_image_path(name_r, "R")
+        if p_l is None or p_r is None:
+            logger.warning(f"找不到图像对: {name_l} / {name_r}")
+            return None
+        img_l = cv2.imread(str(p_l))
+        img_r = cv2.imread(str(p_r))
+        rect_l = cv2.remap(img_l, m1l, m2l, cv2.INTER_LINEAR)
+        rect_r = cv2.remap(img_r, m1r, m2r, cv2.INTER_LINEAR)
+        out_l = out_dir / f"{name_l}_rectified.png"
+        out_r = out_dir / f"{name_r}_rectified.png"
+        cv2.imwrite(str(out_l), rect_l)
+        cv2.imwrite(str(out_r), rect_r)
+        out_stitched = None
+        if make_stitched:
             pts_l = self.corners.get(f"L_{name_l}")
             pts_r = self.corners.get(f"R_{name_r}")
-            # 角点跟着 rectify maps 走, 否则画在错位
+            # 角点跟着 rectify maps 走, 否则会落在错位
             pts_l_rect = self._remap_points(pts_l, m1l, m2l) if pts_l is not None else None
             pts_r_rect = self._remap_points(pts_r, m1r, m2r) if pts_r is not None else None
-            stitched = self._make_stereo_overlay(rect_l, rect_r, pts_l_rect, pts_r_rect)
-            cv2.imwrite(str(out_dir / f"{name_l}_stitched.png"), stitched)
-            logger.info(f"双目 rectify 样本: {name_l}/{name_r} (L/R + stitched)")
+            # 反投影角点: 在原图坐标系用 K, D, rvec, tvec 投影世界点, 再 remap 到 rectified
+            reproj_l_rect, reproj_r_rect = self._reproject_to_rectified(
+                name_l, name_r, m1l, m2l, m1r, m2r,
+            )
+            stitched = self._make_stereo_overlay(rect_l, rect_r, pts_l_rect, pts_r_rect,
+                                                  reproj_l_rect=reproj_l_rect,
+                                                  reproj_r_rect=reproj_r_rect)
+            out_stitched = out_dir / f"{name_l}_stitched.png"
+            cv2.imwrite(str(out_stitched), stitched)
+        logger.info(f"rectify 样本: {name_l}/{name_r} -> {out_dir}")
+        return {"left": out_l, "right": out_r, "stitched": out_stitched}
+
+    def _reproject_to_rectified(self, name_l, name_r, m1l, m2l, m1r, m2r):
+        """反投影世界点到原图, 再 remap 到 rectified 空间.
+        关键: 反投影用每张图自己的 rvec/tvec (K, D 也是每张图自己的),
+        所以 detected vs reprojected 的差距 = 标定残差, 跟 rectified 误差一致."""
+        world = self.world_points.reshape(-1, 1, 3).astype(np.float32)
+        reproj_l_rect = reproj_r_rect = None
+        pose_l = self.poses.get(f"L_{name_l}")
+        if pose_l is not None:
+            rvec_l, tvec_l = pose_l
+            proj_l, _ = cv2.projectPoints(world, rvec_l, tvec_l,
+                                          self.K["L"], self.D["L"])
+            reproj_l_rect = self._remap_points(proj_l.reshape(-1, 2), m1l, m2l)
+        pose_r = self.poses.get(f"R_{name_r}")
+        if pose_r is not None:
+            rvec_r, tvec_r = pose_r
+            proj_r, _ = cv2.projectPoints(world, rvec_r, tvec_r,
+                                          self.K["R"], self.D["R"])
+            reproj_r_rect = self._remap_points(proj_r.reshape(-1, 2), m1r, m2r)
+        return reproj_l_rect, reproj_r_rect
+
+    def _rectify_mono_image(self, name, out_dir):
+        K, D = self.K["L"], self.D["L"]
+        path = self._resolve_image_path(name, "L")
+        if path is None:
+            logger.warning(f"找不到图像: {name}")
+            return None
+        img = cv2.imread(str(path))
+        und = cv2.undistort(img, K, D)
+        out = out_dir / f"{name}_undistorted.png"
+        cv2.imwrite(str(out), und)
+        logger.info(f"undistort 样本: {name} -> {out_dir}")
+        return {"undistorted": out}
+
+    def batch_rectify(self, out_dir=None, n_samples=None, make_stitched: bool = True):
+        """遍历 pairRecord.txt 跑 rectify.
+        n_samples=None: 全部 (从 pairRecord.txt)
+        n_samples=int : 均匀抽样 N 个
+        make_stitched : 是否额外画拼接图 (只对双目生效)
+        """
+        out_dir = Path(out_dir) if out_dir else self.verify_dir / "rectified_samples"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        record = read_pair_record(self.output_dir / "pairRecord.txt")
+        if not record:
+            logger.warning(f"pairRecord 为空或不存在, 跳过 batch_rectify")
+            return []
+        n_total = len(record)
+        if n_samples is None or n_samples >= n_total:
+            sel = list(range(n_total))
+            mode = "全部"
+        else:
+            idx = np.linspace(0, n_total - 1, n_samples, dtype=int)
+            sel = sorted(set(idx.tolist()))
+            mode = f"抽样 {n_samples}"
+        is_stereo = isinstance(record[0], tuple)
+        unit = "对" if is_stereo else "张"
+        logger.info(f"batch_rectify: {mode} ({len(sel)} {unit})")
+        results = []
+        for i in sel:
+            item = record[i]
+            if is_stereo:
+                r = self.rectify_pair(item[0], item[1], out_dir, make_stitched)
+            else:
+                r = self.rectify_pair(item, None, out_dir, make_stitched)
+            if r is not None:
+                results.append(r)
+        return results
+
+    def extract_rectified_samples(self, n_samples: int = 3):
+        """向后兼容包装: 抽样 N 对保存到 verify/samples/.
+        推荐用 batch_rectify(out_dir=..., n_samples=...)."""
+        self.batch_rectify(out_dir=self.verify_dir / "samples",
+                           n_samples=n_samples)
 
     def _make_stereo_overlay(self, img_l, img_r, pts_l, pts_r,
-                             line_spacing: int = 30):
+                             line_spacing: int = 30,
+                             reproj_l_rect=None, reproj_r_rect=None):
         """横向拼接左右图, 画等间距水平线检查 y 对齐.
         - line_spacing: 水平线纵向间隔 (像素)
-        - 如果有角点, 在左右同色圆点标记并连线
+        - pts_l/pts_r: 检测角点 (rectified 坐标), 画 ○
+        - reproj_l_rect/reproj_r_rect: 反投影角点 (rectified 坐标, 用 P1/P2+单位变换),
+          画 ×. 若提供则同时画 ○ 和 ×; 两者不重合时画误差线 (白色细线).
         """
         h, w = img_l.shape[:2]
         sep_w = 12
@@ -635,11 +679,10 @@ class PostCalibration:
                 cv2.putText(canvas, f"y={y}", (4, max(y - 3, 11)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
 
-        # 2) 角点叠加: 同一世界点在左右图的投影用同色圆点, 跨左右图连线
-        #    54 个全画太挤, 按 9x6 board 网格每行/列采样约 6-9 个代表点
+        # 2) 检测角点 (○) + 反投影角点 (×) + 误差线
+        #    54 个全画太挤, 按 sqrt(n_pts) 抽样约 7-8 个代表点
         if pts_l is not None and pts_r is not None and len(pts_l) == len(pts_r):
             n_pts = len(pts_l)
-            # 抽样: 棋盘行列交叉位置 (大约 sqrt(n_pts) 个均匀索引)
             sample_step = max(1, int(np.sqrt(n_pts)))
             sample_idx = list(range(0, n_pts, sample_step))
             for k, i in enumerate(sample_idx):
@@ -647,21 +690,44 @@ class PostCalibration:
                 bgr = cv2.cvtColor(np.uint8([[[h_val, 255, 255]]]),
                                    cv2.COLOR_HSV2BGR).reshape(3).tolist()
                 color = (int(bgr[0]), int(bgr[1]), int(bgr[2]))
-                y_l = int(round(pts_l[i][1]))
-                y_r = int(round(pts_r[i][1]))
+                # 检测点 (rectified 坐标)
                 x_l = int(round(pts_l[i][0]))
+                y_l = int(round(pts_l[i][1]))
                 x_r = int(round(pts_r[i][0])) + w + sep_w
+                y_r = int(round(pts_r[i][1]))
                 # 跨左右图连线 (校正后应水平)
                 cv2.line(canvas, (x_l, y_l), (x_r, y_r),
                          color, 1, cv2.LINE_AA)
-                cv2.circle(canvas, (x_l, y_l), 3, color, -1, cv2.LINE_AA)
-                cv2.circle(canvas, (x_r, y_r), 3, color, -1, cv2.LINE_AA)
+                # 圆圈 (检测点)
+                cv2.circle(canvas, (x_l, y_l), 4, color, 2, cv2.LINE_AA)
+                cv2.circle(canvas, (x_r, y_r), 4, color, 2, cv2.LINE_AA)
+                # 反投影点 (×)
+                if reproj_l_rect is not None and reproj_r_rect is not None:
+                    rx_l = int(round(reproj_l_rect[i][0]))
+                    ry_l = int(round(reproj_l_rect[i][1]))
+                    rx_r = int(round(reproj_r_rect[i][0])) + w + sep_w
+                    ry_r = int(round(reproj_r_rect[i][1]))
+                    # 误差线: 检测○ → 反投影× (白色细线)
+                    cv2.line(canvas, (x_l, y_l), (rx_l, ry_l),
+                             (255, 255, 255), 1, cv2.LINE_AA)
+                    cv2.line(canvas, (x_r, y_r), (rx_r, ry_r),
+                             (255, 255, 255), 1, cv2.LINE_AA)
+                    # × (反投影点)
+                    cv2.drawMarker(canvas, (rx_l, ry_l), color,
+                                   markerType=cv2.MARKER_CROSS,
+                                   markerSize=10, thickness=2)
+                    cv2.drawMarker(canvas, (rx_r, ry_r), color,
+                                   markerType=cv2.MARKER_CROSS,
+                                   markerSize=10, thickness=2)
 
-        # 3) 标题
+        # 3) 标题 + 图例
         cv2.putText(canvas, "L (rectified)", (10, 22),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
         cv2.putText(canvas, "R (rectified)", (w + sep_w + 10, 22),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+        if reproj_l_rect is not None:
+            cv2.putText(canvas, "○ detected,  × reproj", (10, h - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 2, cv2.LINE_AA)
         return canvas
 
     # ----------------------------------------------- stereo image helpers
