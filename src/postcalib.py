@@ -779,6 +779,29 @@ class PostCalibration:
         F = np.linalg.inv(K_r).T @ E @ np.linalg.inv(K_l)
         return F
 
+    def _compute_epipoles(self):
+        """根据公式计算双目极点 (homogeneous → Euclidean).
+
+        左极点 e_l = K_l · R^T · t  (右相机光心在左图中的投影)
+        右极点 e_r = K_r · t        (左相机光心在右图中的投影)
+
+        Returns
+        -------
+        e_l, e_r : (2,) ndarray or None
+            欧氏坐标; 若 z≈0 (极点在无穷远) 则返回 None.
+        """
+        K_l = self.K["L"]
+        K_r = self.K["R"]
+        R = self.stereo_R
+        t = self.stereo_t.flatten()
+
+        e_l_h = K_l @ (R.T @ t)       # 左极点 homogeneous
+        e_r_h = K_r @ t               # 右极点 homogeneous
+
+        e_l = e_l_h[:2] / e_l_h[2] if abs(e_l_h[2]) > 1e-9 else None
+        e_r = e_r_h[:2] / e_r_h[2] if abs(e_r_h[2]) > 1e-9 else None
+        return e_l, e_r
+
     # -------------------------------------------------------- epipolar pre
     def plot_epipolar_before(self):
         """校正前: 在 undistort 后左图画角点, 右图画对应极线 + 真实匹配点."""
@@ -798,6 +821,7 @@ class PostCalibration:
         K_l, D_l = self.K["L"], self.D["L"]
         K_r, D_r = self.K["R"], self.D["R"]
         F = self._fundamental_matrix()
+        e_l, e_r = self._compute_epipoles()
 
         # 只 undistort, 不 rectify
         img_l_und = cv2.undistort(img_l, K_l, D_l)
@@ -810,50 +834,72 @@ class PostCalibration:
             logger.warning("角点缺失, 跳过 epipolar_before")
             return
 
+        # ---- 辅助: 求极线与图像边界的两个交点 ----
+        def _line_boundary_pts(a, b, c, w, h):
+            """返回直线 ax+by+c=0 落在 [0,w-1]×[0,h-1] 内的边界交点."""
+            pts = []
+            if abs(b) > 1e-9:
+                for x in (0, w - 1):
+                    y = -(c + a * x) / b
+                    if 0 <= y <= h - 1:
+                        pts.append((x, y))
+            if abs(a) > 1e-9:
+                for y in (0, h - 1):
+                    x = -(c + b * y) / a
+                    if 0 <= x <= w - 1:
+                        pts.append((x, y))
+            pts = np.unique(np.round(pts).astype(int), axis=0)
+            return pts if len(pts) >= 2 else None
+
         fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+        # ---- 左图: 角点 + 左极点 + 右→左的极线 ----
         axes[0].imshow(cv2.cvtColor(img_l_und, cv2.COLOR_BGR2RGB))
         axes[0].scatter(pts_l[:, 0], pts_l[:, 1], s=30, c="red",
-                        edgecolors="yellow", linewidths=0.7, zorder=3)
+                        edgecolors="yellow", linewidths=0.7, zorder=3,
+                        label="detected corners")
+        if e_l is not None:
+            axes[0].scatter(e_l[0], e_l[1], s=280, c="cyan", marker="*",
+                            edgecolors="black", linewidths=1.2, zorder=5,
+                            label=f"left epipole ({e_l[0]:.0f}, {e_l[1]:.0f})")
+        # 右→左极线: l_l = F^T · p_r
+        for p in pts_r:
+            a, b, c = F.T @ np.array([p[0], p[1], 1.0])
+            seg = _line_boundary_pts(a, b, c, w, h)
+            if seg is not None:
+                axes[0].plot([seg[0][0], seg[1][0]], [seg[0][1], seg[1][1]],
+                             "r-", alpha=0.4, linewidth=0.7, zorder=2)
         axes[0].set_title(f"Left (undistorted) — {name_l}\n"
-                          f"detected corners: {len(pts_l)}")
+                          f"corners: {len(pts_l)}"
+                          + (f"  |  epipole: ({e_l[0]:.0f}, {e_l[1]:.0f})"
+                             if e_l is not None else ""))
         axes[0].set_xlim(0, w - 1)
         axes[0].set_ylim(h - 1, 0)
         axes[0].axis("off")
+        axes[0].legend(loc="upper right", fontsize=8)
 
-        # 右图: 画极线 (红线) + 真实匹配点 (绿圈)
+        # ---- 右图: 角点 + 右极点 + 左→右的极线 ----
         axes[1].imshow(cv2.cvtColor(img_r_und, cv2.COLOR_BGR2RGB))
         axes[1].scatter(pts_r[:, 0], pts_r[:, 1], s=30, c="lime",
                         edgecolors="black", linewidths=0.7, zorder=3,
                         label="matched right corner")
-        # 极线: l[0]x + l[1]y + l[2] = 0  →  x = (-l[1]y - l[2]) / l[0]
-        # 端点用 x 在 [0, w-1] 范围内采样, 避免 F 未归一化时坐标爆掉
-        n_samples = 80
-        xs = np.linspace(0, w - 1, n_samples)
+        if e_r is not None:
+            axes[1].scatter(e_r[0], e_r[1], s=280, c="cyan", marker="*",
+                            edgecolors="black", linewidths=1.2, zorder=5,
+                            label=f"right epipole ({e_r[0]:.0f}, {e_r[1]:.0f})")
+        # 左→右极线: l_r = F · p_l
         for p in pts_l:
-            line = F @ np.array([p[0], p[1], 1.0])
-            if abs(line[0]) < 1e-9:
-                continue
-            ys = (-line[0] * xs - line[2]) / line[1]
-            # 只画落在 [0, h-1] 范围内的连续段
-            mask = (ys >= 0) & (ys <= h - 1)
-            if not mask.any():
-                continue
-            # 找 mask 连续段
-            seg_start = None
-            for i in range(n_samples):
-                if mask[i] and seg_start is None:
-                    seg_start = i
-                elif not mask[i] and seg_start is not None:
-                    axes[1].plot(xs[seg_start:i], ys[seg_start:i], "r-",
-                                 alpha=0.4, linewidth=0.7, zorder=2)
-                    seg_start = None
-            if seg_start is not None:
-                axes[1].plot(xs[seg_start:], ys[seg_start:], "r-",
-                             alpha=0.4, linewidth=0.7, zorder=2)
+            a, b, c = F @ np.array([p[0], p[1], 1.0])
+            seg = _line_boundary_pts(a, b, c, w, h)
+            if seg is not None:
+                axes[1].plot([seg[0][0], seg[1][0]], [seg[0][1], seg[1][1]],
+                             "r-", alpha=0.4, linewidth=0.7, zorder=2)
         axes[1].set_xlim(0, w - 1)
         axes[1].set_ylim(h - 1, 0)
         axes[1].set_title(f"Right (undistorted) — epipolar lines from LEFT corners\n"
-                          f"(red = l_r = F·p_l,  green = real matched)")
+                          f"(red = l_r = F·p_l,  green = matched,  "
+                          f"cyan ★ = epipole)"
+                          + (f"  |  epipole: ({e_r[0]:.0f}, {e_r[1]:.0f})"
+                             if e_r is not None else ""))
         axes[1].axis("off")
         axes[1].legend(loc="upper right", fontsize=9)
 
